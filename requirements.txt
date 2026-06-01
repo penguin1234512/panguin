@@ -1,16 +1,7 @@
-# Web Framework
-fastapi>=0.110.0
-uvicorn>=0.28.0
-
-# OpenAI API
-openai>=1.14.0
-
-# 금융 데이터 수집 (최근 한 달 시황 조회용)
-yfinance>=0.2.37
-pandas>=2.2.0
-
-# 환경 변수 관리 (.env 파일 로드용)
-python-dotenv>=1.0.1
-
-# HTTP 요청 (필요시 외부 뉴스 크롤링용)
-requests>=2.31.0
+Flask==3.0.3
+requests==2.32.3
+beautifulsoup4==4.12.3
+openai
+google-genai
+lxml
+python-dotenv
