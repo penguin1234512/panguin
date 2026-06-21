@@ -1,5 +1,6 @@
 import os
 import random
+import threading  # 백그라운드 처리를 위한 쓰레드 추가
 import requests
 import urllib.parse
 from flask import Flask, request, jsonify
@@ -25,16 +26,9 @@ def kakao_text(text):
 def home():
     return "History Chatbot Server is running on Render!"
 
-# 시나리오 1: 역사 지식 검색
-@app.route("/history-ai", methods=["POST"])
-def history_ai():
-    data = request.get_json(silent=True) or {}
-    params = data.get("action", {}).get("params", {})
-    event_name = params.get("history_event", "").strip()
 
-    if not event_name:
-        return jsonify(kakao_text("궁금한 역사적 사건을 알려주세요."))
-
+# 백그라운드에서 OpenAI를 호출하고 카카오로 결과를 쏴주는 함수
+def process_openai_callback(event_name, callback_url):
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -47,7 +41,44 @@ def history_ai():
         result_text = response.choices.message.content.strip()
     except Exception as e:
         result_text = f"AI 호출 오류: {str(e)}"
-    return jsonify(kakao_text(result_text))
+
+    # 카카오 캘백 URL로 최종 결과 전송
+    callback_payload = kakao_text(result_text)
+    try:
+        requests.post(callback_url, json=callback_payload, timeout=10)
+    except Exception as e:
+        print(f"Callback 전송 실패: {e}")
+
+
+# 시나리오 1: 역사 지식 검색 (지연 응답 적용)
+@app.route("/history-ai", methods=["POST"])
+def history_ai():
+    data = request.get_json(silent=True) or {}
+    params = data.get("action", {}).get("params", {})
+    event_name = params.get("history_event", "").strip()
+
+    if not event_name:
+        return jsonify(kakao_text("궁금한 역사적 사건을 알려주세요."))
+
+    # 카카오에서 제공하는 캘백 URL 추출
+    callback_url = data.get("userRequest", {}).get("callbackUrl")
+
+    if callback_url:
+        # 백그라운드 쓰레드를 생성하여 OpenAI 호출 진행 (타임아웃 방지)
+        threading.Thread(target=process_openai_callback, args=(event_name, callback_url)).start()
+        
+        # 5초 이내에 카카오 챗봇에 먼저 던져줄 임시 대기 메시지
+        return jsonify({
+            "version": "2.0",
+            "useCallback": True,  # 나중에 캘백으로 답장 주겠다고 카카오에 선언
+            "template": {
+                "outputs": [{"simpleText": {"text": f"⏳ '{event_name}'에 대해 열 열심히 생각하고 있습니다! 잠시만 기다려주세요..."}}]
+            }
+        })
+    else:
+        # 만약 스킬 테스트 등에서 callbackUrl이 넘어오지 않을 때를 대비한 예외 처리
+        return jsonify(kakao_text("기본 응답 설정을 확인해 주세요. (Callback 불가 환경)"))
+
 
 # 시나리오 2: 역사 퀴즈 (이미지 포함)
 @app.route("/history-quiz", methods=["POST"])
@@ -79,8 +110,8 @@ def history_news():
     query = urllib.parse.quote(search_key)
     url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
     try:
-        r = requests.get(url, timeout=10)
-        soup = BeautifulSoup(r.text, "xml") # RSS 파싱을 위해 lxml 필요
+        r = requests.get(url, timeout=4)  # 타임아웃을 4초로 줄여 안전장치 확보
+        soup = BeautifulSoup(r.text, "xml")
         titles = [item.title.text for item in soup.find_all("item")[:5]]
         result = f"'{search_key}' 뉴스:\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
     except Exception as e:
@@ -88,6 +119,5 @@ def history_news():
     return jsonify(kakao_text(result))
 
 if __name__ == "__main__":
-    # Render 환경의 포트 설정을 준수합니다.
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
