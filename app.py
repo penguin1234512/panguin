@@ -3,14 +3,23 @@ import random
 import threading  # 백그라운드 처리를 위한 쓰레드 추가
 import requests
 import urllib.parse
+import httpx       # Python 3.14 하위 호환성 우회를 위해 추가
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
 app = Flask(__name__)
 
-# Render 환경변수에서 API 키를 읽어옵니다.
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# [수정] Python 3.14 및 httpx 환경에서 proxies 매칭 오류를 우회하기 위한 안전한 HTTP 클라이언트 수동 선언
+custom_http_client = httpx.Client(
+    proxy=os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
+)
+
+# Render 환경변수에서 API 키를 읽어오되, 커스텀 클라이언트를 주입하여 터지는 현상을 방지합니다.
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    http_client=custom_http_client
+)
 
 def kakao_text(text):
     """카카오톡 응답 규격 및 1000자 제한 안전장치"""
@@ -72,7 +81,7 @@ def history_ai():
             "version": "2.0",
             "useCallback": True,  # 나중에 캘백으로 답장 주겠다고 카카오에 선언
             "template": {
-                "outputs": [{"simpleText": {"text": f"⏳ '{event_name}'에 대해 열 열심히 생각하고 있습니다! 잠시만 기다려주세요..."}}]
+                "outputs": [{"simpleText": {"text": f"⏳ '{event_name}'에 대해 열심히 생각하고 있습니다! 잠시만 기다려주세요..."}}]
             }
         })
     else:
