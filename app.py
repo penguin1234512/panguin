@@ -2,26 +2,26 @@ import os
 import random
 import requests
 import urllib.parse
-import httpx       # Python 3.14 하위 호환성 우회를 위해 유지
+import httpx
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
 app = Flask(__name__)
 
-# Python 3.14 및 httpx 환경에서 proxies 매칭 오류를 우회하기 위한 안전한 HTTP 클라이언트 선언
+# Python 3.14 호환 및 Render 프록시 오류 우회를 위한 커스텀 HTTP 클라이언트 설정
 custom_http_client = httpx.Client(
     proxy=os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
 )
 
-# Render 환경변수에서 API 키를 읽어옵니다.
+# Render 환경변수(Environment)에서 OPENAI_API_KEY를 읽어옵니다.
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     http_client=custom_http_client
 )
 
 def kakao_text(text):
-    """카카오톡 응답 규격 및 1000자 제한 안전장치"""
+    """카카오톡 응답 규격 포맷팅 (1000자 초과 방지 안전장치)"""
     safe_text = text[:950] + "..." if len(text) > 950 else text
     return {
         "version": "2.0",
@@ -32,40 +32,47 @@ def kakao_text(text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "History Chatbot Server is running on Render!"
+    return "History Chatbot Server is running successfully on Render!"
 
 
-# [수정] 백그라운드 쓰레드와 콜백을 완전히 제거하고, 5초 이내에 직접 동기식으로 즉시 대답하는 함수
+# [역사 사건 검색 블록용 라우팅] 5초 제한을 방어하는 동기식 구조
 @app.route("/history-ai", methods=["POST"])
 def history_ai():
     data = request.get_json(silent=True) or {}
+    
+    # 카카오 오픈빌더에서 보낸 파라미터(history_event) 추출
     params = data.get("action", {}).get("params", {})
     event_name = params.get("history_event", "").strip()
 
+    # 만약 파라미터가 비어있다면 사용자가 입력한 전체 문장(utterance)을 대안으로 사용
     if not event_name:
-        return jsonify(kakao_text("궁금한 역사적 사건을 알려주세요."))
+        event_name = data.get("userRequest", {}).get("utterance", "").strip()
+
+    # 최종적으로도 질문이 비어있을 경우 예외 처리
+    if not event_name or event_name in ["시작", "가보자", "안녕"]:
+        return jsonify(kakao_text("궁금한 역사적 사건이나 인물을 입력해 주세요! (예: 이순신 업적)"))
 
     try:
-        # 5초 타임아웃을 안전하게 지키기 위해 max_tokens를 최적화하고 GPT 프롬프트를 간결화합니다.
+        # gpt-4o-mini를 활용하여 카카오톡 5초 타임아웃 제한 내에 빠르게 응답 생성
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "당신은 역사 선생님입니다. 질문에 대해 핵심 위주로 명확하고 친절하게 대답하세요."},
+                {"role": "system", "content": "당신은 고등학교 역사 선생님입니다. 질문에 대해 쉽고 친절하게 핵심 위주로 요약하여 대답하세요. 답변은 3~4문장 내외로 간결해야 합니다."},
                 {"role": "user", "content": event_name}
             ],
             max_tokens=400,
-            timeout=3.5  # 3.5초가 지나도 GPT가 답을 못 주면 예외 처리로 빠지게 설계 (카카오 5초 제한 방어)
+            timeout=3.5  # 3.5초 타임아웃 설정으로 카카오톡 엔진이 끊기 전에 안전하게 방어
         )
         result_text = response.choices.message.content.strip()
     except Exception as e:
-        # 타임아웃 또는 API 에러 발생 시 처리
-        result_text = "죄송합니다. 답변을 준비하는 과정에서 잠시 지연이 발생했습니다. 다시 한번 질문해 주시겠어요?"
+        # 에러 발생 시 사용자에게 노출할 친절한 멘트
+        result_text = f"죄송합니다. 답변을 생성하는 과정에서 잠시 지연이 발생했습니다. 다시 한번 질문해 주시겠어요?"
 
-    # 대기 메시지 없이 곧바로 카카오톡 엔진에 생성된 AI 답변을 반환합니다.
+    # 즉시 카카오톡 봇 응답 규격으로 데이터 반환
     return jsonify(kakao_text(result_text))
 
 
-# 시나리오 2: 역사 퀴즈 (이미지 포함)
+# 시나리오 2: 역사 퀴즈 (확장용)
 @app.route("/history-quiz", methods=["POST"])
 def history_quiz():
     quiz_id = random.randint(1, 3)
@@ -85,7 +92,7 @@ def history_quiz():
         }
     })
 
-# 시나리오 3: 뉴스 검색 (RSS)
+# 시나리오 3: 뉴스 검색 (RSS 확장용)
 @app.route("/history-news", methods=["POST"])
 def history_news():
     data = request.get_json(silent=True) or {}
@@ -95,7 +102,7 @@ def history_news():
     query = urllib.parse.quote(search_key)
     url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
     try:
-        r = requests.get(url, timeout=3)  # 타임아웃을 3초로 안정화
+        r = requests.get(url, timeout=3)
         soup = BeautifulSoup(r.text, "xml")
         titles = [item.title.text for item in soup.find_all("item")[:5]]
         result = f"'{search_key}' 뉴스:\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
