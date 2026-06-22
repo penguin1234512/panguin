@@ -6,12 +6,12 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# Render 프록시 네트워크 및 Python 3.14+ 가드를 우회하기 위한 httpx 클라이언트 세팅
+# Render 프록시 네트워크 및 Python 가드를 우회하기 위한 httpx 클라이언트 세팅
 custom_http_client = httpx.Client(
     proxy=os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
 )
 
-# Render 대시보드 환경변수(Environment)에 등록해 둔 OPENAI_API_KEY를 자동으로 가져옵니다.
+# OpenAI 클라이언트 초기화
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     http_client=custom_http_client
@@ -28,8 +28,13 @@ def kakao_text(text):
     }
 
 def kakao_error_report(route_name, error, detail):
-    """서버 내부 에러 발생 시 카톡창에 상세 로그를 강제로 박아버리는 디버깅용 함수"""
-    error_msg = f"❌ [{route_name}] 서버 에러 발생!\n\n원인: {str(error)}\n\n상세 정보:\n{str(detail)[:400]}"
+    """서버 내부 에러 발생 시 카톡창에 간결하게 에러 보고"""
+    # 3초 타임아웃 에러 시 사용자가 알기 쉽게 가벼운 메시지로 변환
+    if "timeout" in str(error).lower():
+        error_msg = f"⏱️ [{route_name}] 답변 생성 시간이 3초를 초과했습니다. 잠시 후 다시 시도해주세요."
+    else:
+        error_msg = f"❌ [{route_name}] 에러 발생!\n원인: {str(error)}"
+    
     return jsonify({
         "version": "2.0",
         "template": {
@@ -39,70 +44,73 @@ def kakao_error_report(route_name, error, detail):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "History Multi-Function Debug Server is running!"
+    return "History Fast-Response Server is running!"
 
 
-# 1. 역사 지식 검색 엔드포인트 (오픈빌더 스킬 URL: 서버주소/history-ai)
+# 1. 역사 지식 검색 엔드포인트 (타임아웃 2.8초 최적화)
 @app.route("/history-ai", methods=["POST"])
 def history_ai():
     data = request.get_json(silent=True) or {}
-    params = data.get("action", {}).get("params", {})
+    
+    params = data.get("action", {}).get("params", {}) or {}
     event_name = params.get("history_event", "").strip()
 
     if not event_name:
-        event_name = data.get("userRequest", {}).get("utterance", "").strip()
+        user_request = data.get("userRequest", {}) or {}
+        event_name = user_request.get("utterance", "").strip()
 
     if not event_name:
         return jsonify(kakao_text("궁금한 역사 키워드가 전달되지 않았습니다."))
 
     try:
+        # 응답 속도를 올리기 위해 max_tokens를 줄이고, 프롬프트를 극도로 압축
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "당신은 고등학교 역사 선생님입니다. 질문에 대해 핵심 위주로 3문장 내외로 간결하게 요약하여 대답하세요."},
+                {"role": "system", "content": "너는 역사 교사다. 질문에 2문장(100자 내외)으로 핵심만 아주 짧고 빠르게 답해라. 미사여구 금지."},
                 {"role": "user", "content": event_name}
             ],
-            max_tokens=300,
-            timeout=4.3
+            max_tokens=150, # 토큰이 작을수록 생성 속도가 비약적으로 빨라집니다.
+            timeout=2.8     # 카카오톡 5초 제한 및 사용자 요구에 맞춰 2.8초로 컷
         )
-        return jsonify(kakao_text(response.choices.message.content.strip()))
+        return jsonify(kakao_text(response.choices[0].message.content.strip()))
     except Exception as e:
         return kakao_error_report("history-ai", e, traceback.format_exc())
 
 
-# 2. 역사 뉴스 크롤링 엔드포인트 (오픈빌더 스킬 URL: 서버주소/news)
+# 2. 역사 뉴스 크롤링 엔드포인트 (타임아웃 2.8초 최적화)
 @app.route("/news", methods=["POST"])
 def get_history_news():
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "당신은 최신 역사학계 소식과 문화재 발굴 뉴스를 전하는 크롤러 엔진입니다."},
-                {"role": "user", "content": "현재 기준 가장 최신의 역사 관련 뉴스, 문화재 발굴 소식 3개를 요약과 함께 리스트 형태로 알려줘."}
+                {"role": "system", "content": "너는 역사 뉴스 알리미다. 최신 발굴 소식 2개만 제목 위주로 핵심만 아주 짧게 요약해."},
+                {"role": "user", "content": "가장 최신의 역사 관련 뉴스, 문화재 발굴 소식 2개만 한 줄 요약 형태로 아주 짧게 줘."}
             ],
-            max_tokens=350,
-            timeout=4.3
+            max_tokens=200,
+            timeout=2.8
         )
-        result_text = "📰 [최신 역사 뉴스 브리핑]\n\n" + response.choices.message.content.strip()
+        result_text = "📰 [최신 역사 뉴스]\n\n" + response.choices[0].message.content.strip()
         return jsonify(kakao_text(result_text))
     except Exception as e:
         return kakao_error_report("news", e, traceback.format_exc())
 
 
-# 3. 역사 도서 크롤링 엔드포인트 (오픈빌더 스킬 URL: 서버주소/books)
+# 3. 역사 도서 크롤링 엔드포인트 (타임아웃 2.8초 최적화)
 @app.route("/books", methods=["POST"])
 def get_history_books():
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "너는 역사 도서 추천 봇이야. 제목과 한줄 요약만 딱 2권 짧게 말해."},
-                {"role": "user", "content": "고등학생이 읽기 좋은 추천 역사 도서 2권만 [도서명 / 저자 / 한줄요약] 구조로 콤팩트하게 줘."}
+                {"role": "system", "content": "너는 역사 도서 추천 봇이다. 딱 1~2권만 제목과 저자만 한 줄로 말해."},
+                {"role": "user", "content": "추천 역사 도서 2권만 [도서명 / 저자 / 요약] 구조로 아주 짧게 줘."}
             ],
-            max_tokens=250,
-            timeout=4.3
+            max_tokens=150,
+            timeout=2.8
         )
-        result_text = "📚 [추천 역사 도서 목록]\n\n" + response.choices.message.content.strip()
+        result_text = "📚 [추천 역사 도서]\n\n" + response.choices[0].message.content.strip()
         return jsonify(kakao_text(result_text))
     except Exception as e:
         return kakao_error_report("books", e, traceback.format_exc())
